@@ -1,0 +1,79 @@
+services:
+  # 1. LLM Service (Qwen 3 8B)
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-server
+    runtime: nvidia
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    ports:
+      - "8000:8000"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    command: >
+      Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4
+      --quantization gptq
+      --gpu-memory-utilization 0.85
+      --max-model-len 4096
+      --enable-auto-tool-choice
+      --tool-call-parser hermes
+      --enforce-eager
+
+  # 2. STT Service (Faster Whisper)
+  whisper:
+    image: fedirz/faster-whisper-server:latest-cpu
+    container_name: whisper-server
+    environment:
+      - WHISPER_MODEL=Systran/faster-distil-whisper-small.en  # Use smaller distilled model
+      - WHISPER_COMPUTE_TYPE=int8     # Use int8 for CPU
+    ports:
+      - "8001:8000" # Mapped to 8001 to avoid conflict with vLLM
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    depends_on:
+      - vllm  # Wait for vLLM to start first
+
+  # 3. WebSocket Backend
+  websocket-backend:
+    build: 
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: websocket-backend
+    ports:
+      - "8002:8001" # WebSocket server on 8002 to avoid conflict
+    volumes:
+      - ./backend.py:/app/backend.py
+    environment:
+      - LLM_API_URL=http://vllm:8000/v1
+      - STT_API_URL=http://whisper:8000/v1
+      - TTS_API_URL=http://kokoro-tts:8880/v1/audio/speech
+      - WEATHER_API_KEY=${WEATHER_API_KEY}
+    depends_on:
+      - vllm
+      - whisper
+      - kokoro-tts
+
+  # 4. Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: voice-frontend
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_WS_URL=ws://localhost:8002/ws
+    depends_on:
+      - websocket-backend
+
+  # 5. TTS Service (Kokoro)
+  kokoro-tts:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+    container_name: kokoro-tts
+    # CPU version - no GPU needed
+    ports:
+      - "8880:8880"
